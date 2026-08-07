@@ -77,8 +77,8 @@ REFRESH_INTERVAL = int(os.getenv("REFRESH_INTERVAL", "2700"))  # 45 min auto-ref
 PROXY_LIST = []  # Will be populated from storage or env vars
 PROXY_FILE = os.getenv("PROXY_FILE", "proxies.json")  # Persistent proxy storage
 
-# Debug mode: set DEBUG=true in Render env vars for verbose logs
-DEBUG_MODE = os.getenv("DEBUG", "").lower() in ("1", "true", "yes", "on")
+# Debug mode: set DEBUG=false in Render env vars to disable verbose logs
+DEBUG_MODE = os.getenv("DEBUG", "true").lower() not in ("0", "false", "no", "off")
 LOG_LEVEL = logging.DEBUG if DEBUG_MODE else logging.INFO
 
 # ============================================================
@@ -496,21 +496,30 @@ def normalize_token(api, data):
 
 async def fetch_token_async(uid, password):
     """Fetch JWT token from APIs (async). First success wins."""
+    logger = logging.getLogger(__name__)
+    logger.debug(f"[TOKEN] Fetching token for UID={uid}")
     for api in JWT_APIS:
         try:
             params = {}
             for k, v in api["params"].items():
                 params[k] = v.replace("{uid}", uid).replace("{password}", password)
+            logger.debug(f"[TOKEN] Trying API: {api['name']} for UID={uid}")
             async with aiohttp.ClientSession() as session:
                 async with session.get(api["url"], params=params, timeout=30) as resp:
+                    logger.debug(f"[TOKEN] API {api['name']} returned HTTP {resp.status} for UID={uid}")
                     if resp.status == 200:
                         data = await resp.json()
+                        logger.debug(f"[TOKEN] API {api['name']} response keys: {list(data.keys())}")
                         normalized = normalize_token(api, data)
                         if normalized:
+                            logger.info(f"[TOKEN] ✅ Success via {api['name']} for UID={uid}, region={normalized.get('region', 'N/A')}, token_len={len(normalized.get('token', ''))}")
                             return normalized
+                        else:
+                            logger.warning(f"[TOKEN] API {api['name']} returned 200 but normalization failed for UID={uid}")
         except Exception as e:
-            logging.error(f"Token API {api['name']} error: {e}")
+            logger.error(f"[TOKEN] ❌ API {api['name']} error for UID={uid}: {e}")
             continue
+    logger.error(f"[TOKEN] ❌ All APIs failed for UID={uid}")
     return None
 
 
@@ -610,23 +619,31 @@ async def get_player_info(encrypted_uid, server_name, token):
     logger = logging.getLogger(__name__)
     url = get_endpoint(server_name, "info")
     edata = bytes.fromhex(encrypted_uid)
+    logger.debug(f"[INFO] Fetching player info: server={server_name}, url={url}, uid_len={len(encrypted_uid)}")
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, data=edata, headers=build_headers(token)) as response:
-                if response.status != 200:
-                    logger.warning(f"get_player_info: HTTP {response.status} for {server_name}")
+                status = response.status
+                logger.debug(f"[INFO] GetPlayerPersonalShow returned HTTP {status}")
+                if status != 200:
+                    logger.warning(f"[INFO] ❌ HTTP {status} for {server_name}")
                     return None
                 content = await response.read()
+                logger.debug(f"[INFO] Response size: {len(content)} bytes")
         try:
             items = like_count_pb2.Info()
             items.ParseFromString(content)
+            json_data = json.loads(MessageToJson(items))
+            likes = json_data.get('AccountInfo', {}).get('Likes', 0)
+            nickname = json_data.get('AccountInfo', {}).get('PlayerNickname', 'Unknown')
+            logger.info(f"[INFO] ✅ Player: {nickname}, Likes: {likes}")
             return items
-        except DecodeError:
-            logger.error(f"get_player_info decode error: {content[:100]}")
+        except DecodeError as e:
+            logger.error(f"[INFO] ❌ Decode error: {e}, content={content[:100]}")
             return None
     except Exception as e:
-        logger.error(f"get_player_info error: {e}")
+        logger.error(f"[INFO] ❌ Error: {e}")
         return None
 
 
@@ -644,14 +661,23 @@ async def send_single_like(session, encrypted_uid, token, url, proxy=None):
         kwargs = {}
         if proxy:
             kwargs['proxy'] = proxy
+        
+        # Truncate token for logging (security)
+        token_preview = token[:20] + "..." if len(token) > 20 else token
+        logger.debug(f"[LIKE] Sending LikeProfile request: token={token_preview}, proxy={proxy}")
+        
         async with session.post(url, data=edata, headers=build_headers(token), **kwargs) as response:
             status = response.status
             body = await response.text()  # consume the body — REQUIRED for the like to commit
-            if status != 200:
-                logger.debug(f"Like request returned HTTP {status}: {body[:100]}")
+            
+            if status == 200:
+                logger.debug(f"[LIKE] ✅ HTTP 200 from LikeProfile")
+            else:
+                logger.warning(f"[LIKE] ❌ HTTP {status} from LikeProfile: {body[:200]}")
+            
             return status, body
     except Exception as e:
-        logger.warning(f"Like request error: {e}")
+        logger.warning(f"[LIKE] ❌ Request error: {e}")
         return None, ""
 
 
@@ -678,7 +704,8 @@ async def send_likes(target_uid, server_name, tokens, like_amount=None):
     BATCH_SIZE = 100  # Send 100 concurrent requests at a time
     
     proxy_info = f"with {len(PROXY_LIST)} proxies" if PROXY_LIST else "without proxies (direct)"
-    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} requests={total_requests} batch={BATCH_SIZE} ({proxy_info})")
+    logger.info(f"[LIKE] 🚀 Starting like send: target={target_uid} server={server_name} tokens={len(tokens)} requests={total_requests} batch={BATCH_SIZE} ({proxy_info})")
+    logger.debug(f"[LIKE] URL={url}, encrypted_uid_len={len(encrypted_uid)}")
     
     timeout = aiohttp.ClientTimeout(total=120)
     
@@ -690,7 +717,7 @@ async def send_likes(target_uid, server_name, tokens, like_amount=None):
             batch_num = (batch_start // BATCH_SIZE) + 1
             total_batches = (total_requests + BATCH_SIZE - 1) // BATCH_SIZE
             
-            logger.debug(f"send_likes: batch {batch_num}/{total_batches} (requests {batch_start+1}-{batch_end})")
+            logger.info(f"[LIKE] 📦 Batch {batch_num}/{total_batches}: requests {batch_start+1}-{batch_end} of {total_requests}")
             
             # Cycle through tokens AND proxies for EACH request in this batch
             all_tasks = []
@@ -699,21 +726,30 @@ async def send_likes(target_uid, server_name, tokens, like_amount=None):
                 proxy = PROXY_LIST[i % len(PROXY_LIST)] if PROXY_LIST else None  # ✅ Cycle through ALL proxies
                 all_tasks.append(send_single_like(session, encrypted_uid, token, url, proxy))
             
+            logger.debug(f"[LIKE] Executing batch {batch_num} with {len(all_tasks)} concurrent requests...")
+            
             # Execute this batch concurrently
             results = await asyncio.gather(*all_tasks, return_exceptions=True)
+            
+            batch_200 = 0
             for r in results:
                 if isinstance(r, tuple) and r[0] == 200:
                     count_200 += 1
+                    batch_200 += 1
                     if len(body_samples) < 3:
                         body_samples.append(r[1])
             
+            logger.info(f"[LIKE] ✅ Batch {batch_num} complete: {batch_200}/{batch_size} HTTP 200 responses")
+            
             # Small delay between batches to let the server breathe
             if batch_end < total_requests:
+                logger.debug(f"[LIKE] ⏸️ Waiting 0.5s before next batch...")
                 await asyncio.sleep(0.5)
     
     if body_samples:
-        logger.info(f"send_likes LikeProfile response sample: {body_samples}")
-    logger.debug(f"send_likes: total OK = {count_200}")
+        logger.info(f"[LIKE] 📊 Response samples (first 3): {body_samples}")
+    
+    logger.info(f"[LIKE] 🎯 Total result: {count_200}/{total_requests} HTTP 200 responses")
     return count_200
 
 
@@ -1198,6 +1234,9 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /like <uid> [amount] - send likes to an IND profile."""
+    logger = logging.getLogger(__name__)
+    logger.info(f"[CMD] /like command received from user {update.effective_user.id}")
+    
     if len(context.args) not in (1, 2):
         await update.message.reply_text(
             "⚠️ *Invalid format!*\n\n"
@@ -1232,9 +1271,12 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
         like_amount = int(amount_arg)
+    
+    logger.info(f"[CMD] Like request: target={target_uid}, amount={like_amount}")
 
     # Get tokens for IND accounts
     accounts = get_region_accounts(server)
+    logger.info(f"[CMD] Found {len(accounts)} accounts for {server}")
     if not accounts:
         await update.message.reply_text(
             "❌ No accounts stored for IND.\n\n"
@@ -1254,6 +1296,9 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             # (a hex string) instead triggers "401 token contains an
             # invalid number of segments".
             tokens.append(token_data["token"])
+    
+    logger.info(f"[CMD] Got {len(tokens)} valid tokens out of {len(accounts)} accounts")
+    
     if not tokens:
         await update.message.reply_text(
             "❌ No valid tokens for IND.\n\n"
@@ -1272,16 +1317,21 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # Get before like count
     encrypted_uid = enc(target_uid)
+    logger.debug(f"[CMD] Encrypted UID for info request")
     before_info = await get_player_info(encrypted_uid, server, tokens[0])
     before_like = 0
     if before_info:
         try:
             json_before = json.loads(MessageToJson(before_info))
             before_like = int(json_before.get('AccountInfo', {}).get('Likes', 0))
+            logger.info(f"[CMD] Before like count: {before_like}")
         except Exception:
             before_like = 0
+    else:
+        logger.warning(f"[CMD] ⚠️ Could not get before info for UID={target_uid}")
 
     # Send likes
+    logger.info(f"[CMD] 🚀 Starting like send process...")
     like_count = await send_likes(target_uid, server, tokens, like_amount)
 
     # Get after like count
@@ -1295,9 +1345,13 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             after_like = int(json_after.get('AccountInfo', {}).get('Likes', 0))
             player_uid = str(json_after.get('AccountInfo', {}).get('UID', target_uid))
             nickname = str(json_after.get('AccountInfo', {}).get('PlayerNickname', 'Unknown'))
+            logger.info(f"[CMD] After like count: {after_like}")
         except Exception:
             pass
 
+    # Calculate likes gained
+    likes_gained = after_like - before_like
+    
     # like_count is the number of HTTP 200 responses from LikeProfile.
     # This is the primary success signal because the Garena API returns
     # HTTP 200 even when a like is rejected (cooldown, already-liked, etc.).
@@ -1306,6 +1360,8 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         status_text = "✅ Success"
     else:
         status_text = "⚠️ No likes registered (cooldown or invalid tokens?)"
+    
+    logger.info(f"[CMD] ✅ Like command complete: HTTP_200={like_count}, before={before_like}, after={after_like}, gained={likes_gained}, status={status_text}")
 
     await msg.edit_text(
         "✅ *Likes Delivered!* ✅\n\n"
@@ -1384,13 +1440,28 @@ async def main() -> None:
         logging.error("BOT_TOKEN environment variable is not set!")
         return
 
+    # Configure logging with maximum verbosity for Render logs
     logging.basicConfig(
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        format="%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
         level=LOG_LEVEL,
+        force=True,
     )
+    
+    # Enable debug logging for all modules
     logger = logging.getLogger(__name__)
-    logger.info("Starting Free Fire Like Bot...")
-    logger.info(f"DEBUG_MODE={DEBUG_MODE} (set DEBUG=true in Render env vars for verbose logs)")
+    logger.info("=" * 80)
+    logger.info("🎮 Free Fire Like Bot Starting...")
+    logger.info("=" * 80)
+    logger.info(f"📊 Configuration:")
+    logger.info(f"   DEBUG_MODE={DEBUG_MODE}")
+    logger.info(f"   LOG_LEVEL={logging.getLevelName(LOG_LEVEL)}")
+    logger.info(f"   LIKES_PER_REQUEST={LIKES_PER_REQUEST}")
+    logger.info(f"   REFRESH_INTERVAL={REFRESH_INTERVAL}s ({REFRESH_INTERVAL // 60} min)")
+    logger.info(f"   TOKEN_TTL={TOKEN_TTL}s ({TOKEN_TTL // 60} min)")
+    logger.info(f"   PROXY_LIST loaded: {len(PROXY_LIST)} proxies")
+    logger.info(f"   ADMIN_IDS={ADMIN_IDS}")
+    logger.info(f"   SUPABASE_URL={SUPABASE_URL[:50]}..." if SUPABASE_URL else "   SUPABASE_URL=NOT SET")
+    logger.info("=" * 80)
 
     # concurrent_updates=True lets multiple updates be processed at once,
     # so a slow /like request never blocks other commands.
