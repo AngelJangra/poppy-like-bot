@@ -603,21 +603,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "📖 *Available Commands:*\n\n"
         "🎯 `/like <uid> [amount]`\n"
-        "&nbsp;&nbsp;&nbsp;&nbsp;Send likes (default amount or custom)\n\n"
+        "   → Send likes (default amount or custom)\n\n"
         "📥 `/addaccounts` *(admin)*\n"
-        "&nbsp;&nbsp;&nbsp;&nbsp;Paste accounts list after this command\n\n"
+        "   → Paste accounts list after this command\n\n"
         "📊 `/accounts` *(admin)*\n"
-        "&nbsp;&nbsp;&nbsp;&nbsp;View stored account count\n\n"
+        "   → View stored account count\n\n"
         "🔄 `/refresh` *(admin)*\n"
-        "&nbsp;&nbsp;&nbsp;&nbsp;Refresh IND tokens now\n"
-        "&nbsp;&nbsp;&nbsp;&nbsp;(auto-refreshes every 45 min)\n\n"
+        "   → Refresh IND tokens now\n"
+        "   → (auto-refreshes every 45 min)\n\n"
         "🏥 `/status`\n"
-        "&nbsp;&nbsp;&nbsp;&nbsp;Bot uptime & account stats\n\n"
+        "   → Bot uptime & account stats\n\n"
         "ℹ️ `/help`\n"
-        "&nbsp;&nbsp;&nbsp;&nbsp;Show this menu\n\n"
+        "   → Show this menu\n\n"
         "━━━━━━━━━━━━━━━\n"
         "🖥️ *Server:* `IND` 🇮🇳",
-        parse_mode=ParseMode.HTML,
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 
