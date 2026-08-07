@@ -882,6 +882,11 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     for acc in accounts:
         token_data, _ = await get_token_for_account(acc)
         if token_data:
+            # The JWT bearer token is the correct credential for both
+            # LikeProfile and GetPlayerPersonalShow (Garena expects it in
+            # the Authorization: Bearer header). Using the access_token
+            # (a hex string) instead triggers "401 token contains an
+            # invalid number of segments".
             tokens.append(token_data["token"])
     if not tokens:
         await update.message.reply_text(
@@ -927,8 +932,11 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             pass
 
-    likes_given = after_like - before_like
-    if likes_given != 0:
+    # like_count is the number of HTTP 200 responses from LikeProfile.
+    # This is the primary success signal because the Garena API returns
+    # HTTP 200 even when a like is rejected (cooldown, already-liked, etc.).
+    # The before/after like diff is shown as a secondary diagnostic only.
+    if like_count > 0:
         status_text = "✅ Success"
     else:
         status_text = "⚠️ No likes registered (cooldown or invalid tokens?)"
@@ -937,9 +945,9 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "✅ *Likes Delivered!* ✅\n\n"
         f"👤 *Player:* {escape_md(nickname)}\n"
         f"🆔 *UID:* {escape_md(player_uid)}\n\n"
-        f"❤️ *Likes Given:* {likes_given}\n"
-        f"📈 *Before:* {before_like} likes\n"
-        f"📊 *After:* {after_like} likes\n\n"
+        f"❤️ *Likes Sent:* {like_count}\n"
+        f"📊 *Before:* {before_like} likes\n"
+        f"📈 *After:* {after_like} likes\n\n"
         f"🔥 *Status:* {status_text}",
         parse_mode=ParseMode.MARKDOWN,
     )
