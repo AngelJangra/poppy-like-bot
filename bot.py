@@ -558,7 +558,7 @@ async def send_single_like(session, encrypted_uid, token, url):
         return None
 
 
-async def send_likes(target_uid, server_name, tokens):
+async def send_likes(target_uid, server_name, tokens, like_amount=None):
     """Send many likes concurrently. Returns number of 200 responses."""
     url = get_endpoint(server_name, "like")
     protobuf_message = create_like_protobuf(target_uid, server_name)
@@ -567,7 +567,7 @@ async def send_likes(target_uid, server_name, tokens):
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         # Process in batches of 200 to avoid overwhelming connections
-        remaining = LIKES_PER_REQUEST
+        remaining = like_amount or LIKES_PER_REQUEST
         while remaining > 0:
             batch = min(200, remaining)
             tasks = []
@@ -601,8 +601,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "📖 *Available Commands:*\n\n"
-        "🎯 `/like <uid>`\n"
-        "&nbsp;&nbsp;&nbsp;&nbsp;Send likes to an IND profile\n\n"
+        "🎯 `/like <uid> [amount]`\n"
+        "&nbsp;&nbsp;&nbsp;&nbsp;Send likes (default amount or custom)\n\n"
         "📥 `/addaccounts` *(admin)*\n"
         "&nbsp;&nbsp;&nbsp;&nbsp;Paste accounts list after this command\n\n"
         "📊 `/accounts` *(admin)*\n"
@@ -793,12 +793,14 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /like <uid> - send likes to an IND profile."""
-    if len(context.args) != 1:
+    """Handle /like <uid> [amount] - send likes to an IND profile."""
+    if len(context.args) not in (1, 2):
         await update.message.reply_text(
             "⚠️ *Invalid format!*\n\n"
-            "Usage: `/like <uid>`\n\n"
-            "Example: `/like 6246091984`",
+            "Usage: `/like <uid> [amount]`\n\n"
+            "Examples:\n"
+            "`/like 6246091984`  → default amount\n"
+            "`/like 6246091984 5000`  → custom amount",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -813,6 +815,19 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             parse_mode=ParseMode.MARKDOWN,
         )
         return
+
+    # Determine custom like amount (default = LIKES_PER_REQUEST)
+    like_amount = LIKES_PER_REQUEST
+    if len(context.args) == 2:
+        amount_arg = context.args[1]
+        if not amount_arg.isdigit() or int(amount_arg) <= 0:
+            await update.message.reply_text(
+                f"❌ *Invalid amount:* `{amount_arg}`\n\n"
+                "Amount must be a positive number.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        like_amount = int(amount_arg)
 
     # Get tokens for IND accounts
     accounts = get_region_accounts(server)
@@ -839,7 +854,7 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     msg = await update.message.reply_text(
-        f"⏳ *Sending {LIKES_PER_REQUEST} likes...*\n\n"
+        f"⏳ *Sending {like_amount} likes...*\n\n"
         f"🎯 *Target:* `{target_uid}` {emoji_for(server)}\n"
         f"🖥️ *Server:* {server}\n"
         f"🔑 *Tokens:* {len(tokens)}",
@@ -858,7 +873,7 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             before_like = 0
 
     # Send likes
-    like_count = await send_likes(target_uid, server, tokens)
+    like_count = await send_likes(target_uid, server, tokens, like_amount)
 
     # Get after like count
     after_info = get_player_info(encrypted_uid, server, tokens[0])

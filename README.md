@@ -29,7 +29,7 @@ This is a **Telegram bot** that automatically sends **Free Fire profile likes** 
 |---------|-------------|--------|
 | `/start` | Welcome message | Everyone |
 | `/help` | Show all commands | Everyone |
-| `/like <uid>` | Send 1000 likes to an IND profile | Everyone |
+| `/like <uid> [amount]` | Send likes (default 1000, or custom amount) to an IND profile | Everyone |
 | `/status` | Bot uptime & stats | Everyone |
 | `/addaccounts <list>` | Add accounts (paste list) | 👑 Admin only |
 | `/accounts` | View stored account count | 👑 Admin only |
@@ -78,10 +78,10 @@ Deploy a **background worker / long-running service** with:
 1. **Add accounts** → `/addaccounts` parses your pasted account list and stores them (Supabase)
 2. **Auto token generation** → The bot generates JWT tokens from your account credentials using multiple converter APIs (tried in order until success)
 3. **Auto refresh** → Every 45 minutes, the bot regenerates fresh tokens for all accounts and notifies the admin
-4. **Send likes** → `/like <uid>`:
+4. **Send likes** → `/like <uid> [amount]`:
    - Reads accounts + tokens from Supabase
    - Encrypts the target UID via AES + protobuf
-   - Sends **1000 concurrent like requests** to the Free Fire API
+   - Sends likes concurrently to the Free Fire API (default 1000, or your custom amount)
    - Reports before/after like counts & nickname
 
 ---
