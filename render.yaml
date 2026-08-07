@@ -10,6 +10,7 @@ services:
     plan: free
     buildCommand: "pip install -r bot_requirements.txt"
     startCommand: "python bot.py"
+    healthCheckPath: /health
     envVars:
       - key: BOT_TOKEN
         sync: false  # Set in Render dashboard - from @BotFather

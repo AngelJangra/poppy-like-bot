@@ -21,6 +21,7 @@ import signal
 import binascii
 import requests
 import aiohttp
+from aiohttp import web
 from datetime import datetime
 
 from Crypto.Cipher import AES
@@ -991,6 +992,22 @@ async def main() -> None:
 
     logger.info("Bot is running. Press Ctrl+C to stop.")
 
+    # Start a tiny HTTP health server so Render marks the service as Live.
+    # Render web services expect the process to bind to $PORT (health checks).
+    port = int(os.getenv("PORT", "8000"))
+    health_app = web.Application()
+
+    async def health_check(request):
+        return web.Response(text="OK", status=200)
+
+    health_app.router.add_get("/", health_check)
+    health_app.router.add_get("/health", health_check)
+    health_runner = web.AppRunner(health_app)
+    await health_runner.setup()
+    health_site = web.TCPSite(health_runner, "0.0.0.0", port)
+    await health_site.start()
+    logger.info(f"Health server listening on port {port}")
+
     # Manual lifecycle (compatible with Python 3.14+ where asyncio has no
     # implicit event loop in the main thread; PTB 21.x has no Application.idle)
     await application.initialize()
@@ -1012,6 +1029,7 @@ async def main() -> None:
     await application.updater.stop()
     await application.stop()
     await application.shutdown()
+    await health_runner.cleanup()
 
 
 if __name__ == "__main__":
