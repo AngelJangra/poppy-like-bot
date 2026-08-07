@@ -1516,22 +1516,44 @@ async def main() -> None:
     await application.start()
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
 
-    # Keep running until SIGINT/SIGTERM (works on Linux/Render; gracefully
+# Keep running until SIGINT/SIGTERM (works on Linux/Render; gracefully
     # falls back to sleeping forever on platforms without signal handlers)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    
+    def handle_signal(sig_name):
+        logger.warning(f"🛑 Received {sig_name} signal - initiating shutdown...")
+        if not stop_event.is_set():
+            stop_event.set()
+    
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, stop_event.set)
-        except (NotImplementedError, RuntimeError):
-            pass
-    await stop_event.wait()
+            loop.add_signal_handler(sig, lambda s=sig: handle_signal(signal.Signals(s).name))
+        except (NotImplementedError, RuntimeError) as e:
+            logger.debug(f"Signal handler not available: {e}")
+    
+    logger.info("✅ Bot is now running and waiting for commands...")
+    logger.info("   Press Ctrl+C to stop manually")
+    
+    try:
+        await stop_event.wait()
+    except asyncio.CancelledError:
+        logger.warning("⚠️ Main task was cancelled")
+        stop_event.set()
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in main loop: {e}", exc_info=True)
+        stop_event.set()
 
     # Clean shutdown
-    await application.updater.stop()
-    await application.stop()
-    await application.shutdown()
-    await health_runner.cleanup()
+    logger.info("🔄 Shutting down gracefully...")
+    try:
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+        await health_runner.cleanup()
+        logger.info("✅ Shutdown complete")
+    except Exception as e:
+        logger.error(f"❌ Error during shutdown: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
