@@ -656,12 +656,13 @@ async def send_single_like(session, encrypted_uid, token, url, proxy=None):
 
 
 async def send_likes(target_uid, server_name, tokens, like_amount=None):
-    """Send likes with proper token cycling and proxy rotation.
+    """Send likes with proper token cycling and proxy rotation in batches.
     
     Cycles through ALL available tokens for each request (like the working app.py).
     Each request gets a different token AND proxy to avoid blocking.
+    Processes requests in batches of 100 to avoid overwhelming the server.
     
-    Example: /like (uid) 1000 = 1000 requests using cycling tokens + proxies
+    Example: /like (uid) 1000 = 1000 requests in 10 batches of 100
     
     Returns number of 200 HTTP responses.
     """
@@ -674,27 +675,41 @@ async def send_likes(target_uid, server_name, tokens, like_amount=None):
     
     # Use specified amount or default
     total_requests = like_amount or LIKES_PER_REQUEST
+    BATCH_SIZE = 100  # Send 100 concurrent requests at a time
     
     proxy_info = f"with {len(PROXY_LIST)} proxies" if PROXY_LIST else "without proxies (direct)"
-    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} requests={total_requests} ({proxy_info})")
+    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} requests={total_requests} batch={BATCH_SIZE} ({proxy_info})")
     
     timeout = aiohttp.ClientTimeout(total=120)
     
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        # Cycle through tokens AND proxies for EACH request (critical for success!)
-        all_tasks = []
-        for i in range(total_requests):
-            token = tokens[i % len(tokens)]  # ✅ Cycle through ALL tokens
-            proxy = PROXY_LIST[i % len(PROXY_LIST)] if PROXY_LIST else None  # ✅ Cycle through ALL proxies
-            all_tasks.append(send_single_like(session, encrypted_uid, token, url, proxy))
-        
-        # Execute all requests concurrently
-        results = await asyncio.gather(*all_tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, tuple) and r[0] == 200:
-                count_200 += 1
-                if len(body_samples) < 3:
-                    body_samples.append(r[1])
+        # Process in batches to avoid overwhelming the server
+        for batch_start in range(0, total_requests, BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE, total_requests)
+            batch_size = batch_end - batch_start
+            batch_num = (batch_start // BATCH_SIZE) + 1
+            total_batches = (total_requests + BATCH_SIZE - 1) // BATCH_SIZE
+            
+            logger.debug(f"send_likes: batch {batch_num}/{total_batches} (requests {batch_start+1}-{batch_end})")
+            
+            # Cycle through tokens AND proxies for EACH request in this batch
+            all_tasks = []
+            for i in range(batch_start, batch_end):
+                token = tokens[i % len(tokens)]  # ✅ Cycle through ALL tokens
+                proxy = PROXY_LIST[i % len(PROXY_LIST)] if PROXY_LIST else None  # ✅ Cycle through ALL proxies
+                all_tasks.append(send_single_like(session, encrypted_uid, token, url, proxy))
+            
+            # Execute this batch concurrently
+            results = await asyncio.gather(*all_tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, tuple) and r[0] == 200:
+                    count_200 += 1
+                    if len(body_samples) < 3:
+                        body_samples.append(r[1])
+            
+            # Small delay between batches to let the server breathe
+            if batch_end < total_requests:
+                await asyncio.sleep(0.5)
     
     if body_samples:
         logger.info(f"send_likes LikeProfile response sample: {body_samples}")
