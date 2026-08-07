@@ -915,8 +915,8 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await msg.edit_text(
         "✅ *Likes Delivered!* ✅\n\n"
-        f"👤 *Player:* {nickname}\n"
-        f"🆔 *UID:* {player_uid}\n\n"
+        f"👤 *Player:* {escape_md(nickname)}\n"
+        f"🆔 *UID:* {escape_md(player_uid)}\n\n"
         f"❤️ *Likes Sent:* {like_count}\n"
         f"📈 *Before:* {before_like} likes\n"
         f"📊 *After:* {after_like} likes\n\n"
@@ -970,6 +970,16 @@ def is_admin(user_id: int) -> bool:
 
 def emoji_for(region: str) -> str:
     return "🇮🇳"
+
+
+def escape_md(text: str) -> str:
+    """Escape Markdown special chars in user content (e.g. nicknames)."""
+    if not text:
+        return ""
+    s = str(text)
+    for ch in "\\*_`[#":
+        s = s.replace(ch, "\\" + ch)
+    return s
 
 # ============================================================
 # MAIN
