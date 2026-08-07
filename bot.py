@@ -558,18 +558,25 @@ async def get_player_info(encrypted_uid, server_name, token):
 
 
 async def send_single_like(session, encrypted_uid, token, url):
-    """Send a single like request. Returns HTTP status or None on error."""
+    """Send a single like request. Returns (status, body_text).
+
+    IMPORTANT: The response body MUST be read (like the original app.py's
+    send_request does with response.text()). Not reading the body means the
+    HTTP keep-alive connection is released without consuming the response,
+    so the Garena server never fully commits the like.
+    """
     logger = logging.getLogger(__name__)
     edata = bytes.fromhex(encrypted_uid)
     try:
         async with session.post(url, data=edata, headers=build_headers(token)) as response:
             status = response.status
+            body = await response.text()  # consume the body — REQUIRED for the like to commit
             if status != 200:
-                logger.debug(f"Like request returned HTTP {status}")
-            return status
+                logger.debug(f"Like request returned HTTP {status}: {body[:100]}")
+            return status, body
     except Exception as e:
         logger.warning(f"Like request error: {e}")
-        return None
+        return None, ""
 
 
 async def send_likes(target_uid, server_name, tokens, like_amount=None):
@@ -578,6 +585,7 @@ async def send_likes(target_uid, server_name, tokens, like_amount=None):
     protobuf_message = create_like_protobuf(target_uid, server_name)
     encrypted_uid = encrypt_message(protobuf_message)
     count_200 = 0
+    body_samples = []
     logger = logging.getLogger(__name__)
     logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} amount={like_amount or LIKES_PER_REQUEST}")
     timeout = aiohttp.ClientTimeout(total=30)
@@ -591,10 +599,21 @@ async def send_likes(target_uid, server_name, tokens, like_amount=None):
                 token = tokens[i % len(tokens)]
                 tasks.append(send_single_like(session, encrypted_uid, token, url))
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            batch_ok = sum(1 for r in results if r == 200)
+            batch_ok = 0
+            for r in results:
+                if isinstance(r, tuple) and r[0] == 200:
+                    batch_ok += 1
+                    # Keep up to 3 response bodies as a diagnostic sample.
+                    # The LikeProfile endpoint returns 200 even on rejections
+                    # (cooldown / already-liked / invalid token), so the body
+                    # is the ONLY way to know if the like actually landed.
+                    if len(body_samples) < 3:
+                        body_samples.append(r[1])
             count_200 += batch_ok
             logger.debug(f"send_likes batch: {batch} requests, {batch_ok} OK")
             remaining -= batch
+    if body_samples:
+        logger.info(f"send_likes LikeProfile response sample: {body_samples}")
     logger.debug(f"send_likes: total OK = {count_200}")
     return count_200
 
@@ -908,16 +927,17 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             pass
 
-    if like_count > 0:
+    likes_given = after_like - before_like
+    if likes_given != 0:
         status_text = "✅ Success"
     else:
-        status_text = "⚠️ No likes delivered (cooldown or invalid tokens?)"
+        status_text = "⚠️ No likes registered (cooldown or invalid tokens?)"
 
     await msg.edit_text(
         "✅ *Likes Delivered!* ✅\n\n"
         f"👤 *Player:* {escape_md(nickname)}\n"
         f"🆔 *UID:* {escape_md(player_uid)}\n\n"
-        f"❤️ *Likes Sent:* {like_count}\n"
+        f"❤️ *Likes Given:* {likes_given}\n"
         f"📈 *Before:* {before_like} likes\n"
         f"📊 *After:* {after_like} likes\n\n"
         f"🔥 *Status:* {status_text}",
