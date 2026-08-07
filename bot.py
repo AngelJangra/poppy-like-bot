@@ -72,6 +72,9 @@ except ValueError:
 TOKEN_TTL = 3600  # 1 hour cache for tokens before refresh
 REFRESH_INTERVAL = int(os.getenv("REFRESH_INTERVAL", "2700"))  # 45 min auto-refresh
 
+# Proxy settings - comma-separated list of proxies (format: http://ip:port or socks5://ip:port)
+PROXY_LIST = [p.strip() for p in os.getenv("PROXY_LIST", "").split(",") if p.strip()]
+
 # Debug mode: set DEBUG=true in Render env vars for verbose logs
 DEBUG_MODE = os.getenv("DEBUG", "").lower() in ("1", "true", "yes", "on")
 LOG_LEVEL = logging.DEBUG if DEBUG_MODE else logging.INFO
@@ -557,7 +560,7 @@ async def get_player_info(encrypted_uid, server_name, token):
         return None
 
 
-async def send_single_like(session, encrypted_uid, token, url):
+async def send_single_like(session, encrypted_uid, token, url, proxy=None):
     """Send a single like request. Returns (status, body_text).
 
     IMPORTANT: The response body MUST be read (like the original app.py's
@@ -568,7 +571,10 @@ async def send_single_like(session, encrypted_uid, token, url):
     logger = logging.getLogger(__name__)
     edata = bytes.fromhex(encrypted_uid)
     try:
-        async with session.post(url, data=edata, headers=build_headers(token)) as response:
+        kwargs = {}
+        if proxy:
+            kwargs['proxy'] = proxy
+        async with session.post(url, data=edata, headers=build_headers(token), **kwargs) as response:
             status = response.status
             body = await response.text()  # consume the body — REQUIRED for the like to commit
             if status != 200:
@@ -580,10 +586,11 @@ async def send_single_like(session, encrypted_uid, token, url):
 
 
 async def send_likes(target_uid, server_name, tokens, like_amount=None):
-    """Send likes using multiple requests per credential.
+    """Send likes using multiple requests per credential with proxy rotation.
     
     The like_amount parameter represents the NUMBER OF CREDENTIALS to use.
     Each credential sends REQUESTS_PER_CREDENTIAL (500) concurrent requests.
+    Each credential gets a unique proxy (rotated) to avoid IP blocking.
     The server registers only 1 like per credential, but flooding with
     500 requests per credential maximizes the chance of success.
     
@@ -605,17 +612,22 @@ async def send_likes(target_uid, server_name, tokens, like_amount=None):
     # Use up to requested_credentials, limited by available tokens
     used_credentials = min(len(tokens), requested_credentials)
     
-    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} using={used_credentials} credentials x {REQUESTS_PER_CREDENTIAL} reqs each = {used_credentials * REQUESTS_PER_CREDENTIAL} total requests")
+    proxy_info = f"with {len(PROXY_LIST)} proxies" if PROXY_LIST else "without proxies (direct)"
+    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} using={used_credentials} credentials x {REQUESTS_PER_CREDENTIAL} reqs each = {used_credentials * REQUESTS_PER_CREDENTIAL} total requests ({proxy_info})")
     
     timeout = aiohttp.ClientTimeout(total=120)
+    
+    # Create one session per credential with its own proxy
     async with aiohttp.ClientSession(timeout=timeout) as session:
         # For each credential, send REQUESTS_PER_CREDENTIAL concurrent requests
         all_tasks = []
         for cred_idx in range(used_credentials):
             token = tokens[cred_idx]
-            # Send 500 concurrent requests with this token
+            # Assign a proxy to this credential (cycle through proxy list)
+            proxy = PROXY_LIST[cred_idx % len(PROXY_LIST)] if PROXY_LIST else None
+            # Send 500 concurrent requests with this token + proxy
             for _ in range(REQUESTS_PER_CREDENTIAL):
-                all_tasks.append(send_single_like(session, encrypted_uid, token, url))
+                all_tasks.append(send_single_like(session, encrypted_uid, token, url, proxy))
         
         # Execute all requests concurrently
         results = await asyncio.gather(*all_tasks, return_exceptions=True)
