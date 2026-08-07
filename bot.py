@@ -17,6 +17,7 @@ import re
 import json
 import logging
 import asyncio
+import signal
 import binascii
 import requests
 import aiohttp
@@ -991,11 +992,26 @@ async def main() -> None:
     logger.info("Bot is running. Press Ctrl+C to stop.")
 
     # Manual lifecycle (compatible with Python 3.14+ where asyncio has no
-    # implicit event loop in the main thread)
+    # implicit event loop in the main thread; PTB 21.x has no Application.idle)
     await application.initialize()
     await application.start()
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    await application.idle()
+
+    # Keep running until SIGINT/SIGTERM (works on Linux/Render; gracefully
+    # falls back to sleeping forever on platforms without signal handlers)
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            pass
+    await stop_event.wait()
+
+    # Clean shutdown
+    await application.updater.stop()
+    await application.stop()
+    await application.shutdown()
 
 
 if __name__ == "__main__":
