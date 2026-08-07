@@ -582,11 +582,12 @@ async def send_single_like(session, encrypted_uid, token, url):
 async def send_likes(target_uid, server_name, tokens, like_amount=None):
     """Send likes using multiple requests per credential.
     
-    In Free Fire, each credential can send only 1 like to a profile per day,
-    but the API may accept/reject multiple requests. To maximize success,
-    we send REQUESTS_PER_CREDENTIAL (500) requests per token concurrently.
-    The server will only register 1 like per credential, but flooding with
-    multiple requests increases the chance that at least 1 succeeds.
+    The like_amount parameter represents the NUMBER OF CREDENTIALS to use.
+    Each credential sends REQUESTS_PER_CREDENTIAL (500) concurrent requests.
+    The server registers only 1 like per credential, but flooding with
+    500 requests per credential maximizes the chance of success.
+    
+    Example: /like (uid) 1000 = use 1000 credentials × 500 requests = 500,000 total requests
     
     Returns number of 200 HTTP responses.
     """
@@ -599,16 +600,14 @@ async def send_likes(target_uid, server_name, tokens, like_amount=None):
     
     # Each credential sends 500 requests to maximize chance of 1 like landing
     REQUESTS_PER_CREDENTIAL = 500
-    requested = like_amount or LIKES_PER_REQUEST
+    requested_credentials = like_amount or LIKES_PER_REQUEST
     
-    # Calculate how many credentials to use based on requested likes
-    # If user requests 1000 likes, we need 2 credentials (each sends 500 requests)
-    needed_credentials = max(1, (requested + REQUESTS_PER_CREDENTIAL - 1) // REQUESTS_PER_CREDENTIAL)
-    used_credentials = min(len(tokens), needed_credentials)
+    # Use up to requested_credentials, limited by available tokens
+    used_credentials = min(len(tokens), requested_credentials)
     
-    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} requested={requested} using={used_credentials} credentials x {REQUESTS_PER_CREDENTIAL} reqs each")
+    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} using={used_credentials} credentials x {REQUESTS_PER_CREDENTIAL} reqs each = {used_credentials * REQUESTS_PER_CREDENTIAL} total requests")
     
-    timeout = aiohttp.ClientTimeout(total=60)
+    timeout = aiohttp.ClientTimeout(total=120)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         # For each credential, send REQUESTS_PER_CREDENTIAL concurrent requests
         all_tasks = []
