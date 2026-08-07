@@ -976,7 +976,7 @@ async def check_single_proxy(proxy, test_url="https://httpbin.org/ip", timeout=5
 
 
 async def checkproxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /checkproxies - test all proxies and keep only working fast ones."""
+    """Handle /checkproxies - test all proxies in chunks and keep only working fast ones."""
     global PROXY_LIST
     
     if not is_admin(update.effective_user.id):
@@ -995,10 +995,13 @@ async def checkproxies_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     total_proxies = len(PROXY_LIST)
+    CHUNK_SIZE = 50  # Process 50 proxies at a time to avoid memory issues
+    
     status_msg = await update.message.reply_text(
-        f"🔍 *Checking Proxies...*\n\n"
+        f"🔍 *Checking Proxies (Chunked)...*\n\n"
         f"📊 Total: {total_proxies}\n"
-        f"⏳ Testing... 0/{total_proxies}",
+        f"📦 Chunk Size: {CHUNK_SIZE}\n"
+        f"⏳ Starting...",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -1007,34 +1010,65 @@ async def checkproxies_command(update: Update, context: ContextTypes.DEFAULT_TYP
     failed_count = 0
     fast_threshold_ms = 3000  # Consider "fast" if < 3 seconds
 
-    # Test each proxy
-    for idx, proxy in enumerate(PROXY_LIST):
-        is_working, response_time = await check_single_proxy(proxy)
+    # Process proxies in chunks
+    for chunk_start in range(0, total_proxies, CHUNK_SIZE):
+        chunk_end = min(chunk_start + CHUNK_SIZE, total_proxies)
+        chunk = PROXY_LIST[chunk_start:chunk_end]
+        chunk_num = (chunk_start // CHUNK_SIZE) + 1
+        total_chunks = (total_proxies + CHUNK_SIZE - 1) // CHUNK_SIZE
         
-        if is_working:
-            working_proxies.append(proxy)
-            working_count += 1
+        # Update status for new chunk
+        try:
+            await status_msg.edit_text(
+                f"🔍 *Checking Proxies (Chunked)...*\n\n"
+                f"📊 Total: {total_proxies}\n"
+                f"✅ Working: {working_count}\n"
+                f"❌ Failed: {failed_count}\n"
+                f"📦 Chunk: {chunk_num}/{total_chunks} (proxies {chunk_start+1}-{chunk_end})\n"
+                f"⏳ Testing chunk...",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception:
+            pass
+
+        # Test each proxy in this chunk
+        for idx, proxy in enumerate(chunk):
+            is_working, response_time = await check_single_proxy(proxy)
             
-            # Save immediately after each successful proxy
-            save_proxies(working_proxies)
-            PROXY_LIST = working_proxies.copy()
-            
-            # Update status every 10 proxies or on fast ones
-            if working_count % 10 == 0 or response_time < fast_threshold_ms:
-                try:
-                    await status_msg.edit_text(
-                        f"🔍 *Checking Proxies...*\n\n"
-                        f"📊 Total: {total_proxies}\n"
-                        f"✅ Working: {working_count}\n"
-                        f"❌ Failed: {failed_count}\n"
-                        f"⏳ Testing... {idx + 1}/{total_proxies}\n"
-                        f"⚡ Last: {response_time}ms",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
-                except Exception:
-                    pass  # Ignore edit errors (rate limits)
-        else:
-            failed_count += 1
+            if is_working:
+                working_proxies.append(proxy)
+                working_count += 1
+                
+                # Save immediately after each successful proxy
+                save_proxies(working_proxies)
+                
+                # Update status every 10 proxies or on fast ones
+                if working_count % 10 == 0 or response_time < fast_threshold_ms:
+                    try:
+                        await status_msg.edit_text(
+                            f"🔍 *Checking Proxies (Chunked)...*\n\n"
+                            f"📊 Total: {total_proxies}\n"
+                            f"✅ Working: {working_count}\n"
+                            f"❌ Failed: {failed_count}\n"
+                            f"📦 Chunk: {chunk_num}/{total_chunks}\n"
+                            f"⏳ Testing... {chunk_start + idx + 1}/{total_proxies}\n"
+                            f"⚡ Last: {response_time}ms",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                    except Exception:
+                        pass  # Ignore edit errors (rate limits)
+            else:
+                failed_count += 1
+        
+        # Clear chunk from memory and update global PROXY_LIST
+        PROXY_LIST = working_proxies.copy()
+        
+        # Force garbage collection to free memory
+        import gc
+        gc.collect()
+        
+        # Small delay between chunks to let the bot breathe
+        await asyncio.sleep(1)
 
     # Final update
     try:
