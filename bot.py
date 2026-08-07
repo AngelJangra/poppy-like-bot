@@ -580,38 +580,39 @@ async def send_single_like(session, encrypted_uid, token, url):
 
 
 async def send_likes(target_uid, server_name, tokens, like_amount=None):
-    """Send many likes concurrently. Returns number of 200 responses."""
+    """Send likes using each credential only once per day.
+    
+    In Free Fire, each account can send only 1 like to a profile per day.
+    So we use each token exactly once. The effective likes = min(available tokens, requested amount).
+    Returns number of 200 responses.
+    """
     url = get_endpoint(server_name, "like")
     protobuf_message = create_like_protobuf(target_uid, server_name)
     encrypted_uid = encrypt_message(protobuf_message)
     count_200 = 0
     body_samples = []
     logger = logging.getLogger(__name__)
-    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} amount={like_amount or LIKES_PER_REQUEST}")
+    
+    # Each token can only send 1 like per day to a target. Use each token once.
+    requested = like_amount or LIKES_PER_REQUEST
+    used_count = min(len(tokens), requested)
+    
+    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} requested={requested} using={used_count}")
+    
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        # Process in batches of 200 to avoid overwhelming connections
-        remaining = like_amount or LIKES_PER_REQUEST
-        while remaining > 0:
-            batch = min(200, remaining)
-            tasks = []
-            for i in range(batch):
-                token = tokens[i % len(tokens)]
-                tasks.append(send_single_like(session, encrypted_uid, token, url))
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            batch_ok = 0
-            for r in results:
-                if isinstance(r, tuple) and r[0] == 200:
-                    batch_ok += 1
-                    # Keep up to 3 response bodies as a diagnostic sample.
-                    # The LikeProfile endpoint returns 200 even on rejections
-                    # (cooldown / already-liked / invalid token), so the body
-                    # is the ONLY way to know if the like actually landed.
-                    if len(body_samples) < 3:
-                        body_samples.append(r[1])
-            count_200 += batch_ok
-            logger.debug(f"send_likes batch: {batch} requests, {batch_ok} OK")
-            remaining -= batch
+        # Use each token only once — no cycling
+        tasks = []
+        for i in range(used_count):
+            token = tokens[i]
+            tasks.append(send_single_like(session, encrypted_uid, token, url))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, tuple) and r[0] == 200:
+                count_200 += 1
+                if len(body_samples) < 3:
+                    body_samples.append(r[1])
+    
     if body_samples:
         logger.info(f"send_likes LikeProfile response sample: {body_samples}")
     logger.debug(f"send_likes: total OK = {count_200}")
