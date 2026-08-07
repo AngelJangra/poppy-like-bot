@@ -580,11 +580,15 @@ async def send_single_like(session, encrypted_uid, token, url):
 
 
 async def send_likes(target_uid, server_name, tokens, like_amount=None):
-    """Send likes using each credential only once per day.
+    """Send likes using multiple requests per credential.
     
-    In Free Fire, each account can send only 1 like to a profile per day.
-    So we use each token exactly once. The effective likes = min(available tokens, requested amount).
-    Returns number of 200 responses.
+    In Free Fire, each credential can send only 1 like to a profile per day,
+    but the API may accept/reject multiple requests. To maximize success,
+    we send REQUESTS_PER_CREDENTIAL (500) requests per token concurrently.
+    The server will only register 1 like per credential, but flooding with
+    multiple requests increases the chance that at least 1 succeeds.
+    
+    Returns number of 200 HTTP responses.
     """
     url = get_endpoint(server_name, "like")
     protobuf_message = create_like_protobuf(target_uid, server_name)
@@ -593,20 +597,29 @@ async def send_likes(target_uid, server_name, tokens, like_amount=None):
     body_samples = []
     logger = logging.getLogger(__name__)
     
-    # Each token can only send 1 like per day to a target. Use each token once.
+    # Each credential sends 500 requests to maximize chance of 1 like landing
+    REQUESTS_PER_CREDENTIAL = 500
     requested = like_amount or LIKES_PER_REQUEST
-    used_count = min(len(tokens), requested)
     
-    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} requested={requested} using={used_count}")
+    # Calculate how many credentials to use based on requested likes
+    # If user requests 1000 likes, we need 2 credentials (each sends 500 requests)
+    needed_credentials = max(1, (requested + REQUESTS_PER_CREDENTIAL - 1) // REQUESTS_PER_CREDENTIAL)
+    used_credentials = min(len(tokens), needed_credentials)
     
-    timeout = aiohttp.ClientTimeout(total=30)
+    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} requested={requested} using={used_credentials} credentials x {REQUESTS_PER_CREDENTIAL} reqs each")
+    
+    timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        # Use each token only once — no cycling
-        tasks = []
-        for i in range(used_count):
-            token = tokens[i]
-            tasks.append(send_single_like(session, encrypted_uid, token, url))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # For each credential, send REQUESTS_PER_CREDENTIAL concurrent requests
+        all_tasks = []
+        for cred_idx in range(used_credentials):
+            token = tokens[cred_idx]
+            # Send 500 concurrent requests with this token
+            for _ in range(REQUESTS_PER_CREDENTIAL):
+                all_tasks.append(send_single_like(session, encrypted_uid, token, url))
+        
+        # Execute all requests concurrently
+        results = await asyncio.gather(*all_tasks, return_exceptions=True)
         for r in results:
             if isinstance(r, tuple) and r[0] == 200:
                 count_200 += 1
