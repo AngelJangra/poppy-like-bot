@@ -265,7 +265,7 @@ def save_bot_tokens(data):
                     "region": tok.get("region", ""),
                     "access_token": tok.get("access_token", ""),
                     "open_id": tok.get("open_id", ""),
-                    "fetched_at": tok.get("fetched_at", 0) or 0,
+                    "fetched_at": int(tok.get("fetched_at", 0) or 0),
                 })
             if rows:
                 sb.table(SUPABASE_TOKENS_TABLE).insert(rows).execute()
@@ -446,7 +446,7 @@ async def get_token_for_account(account, force=False):
     token_cache = load_bot_tokens()
     uid = account["uid"]
     cached = token_cache.get(uid)
-    now = datetime.now().timestamp()
+    now = int(datetime.now().timestamp())  # integer seconds (BIGINT compatible)
     if not force and cached and cached.get("fetched_at", 0) >= now - TOKEN_TTL:
         return cached, False
 
