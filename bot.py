@@ -745,6 +745,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "   → Add proxies via text or .txt file\n\n"
         "📋 `/proxies` *(admin)*\n"
         "   → View stored proxy count\n\n"
+        "🔍 `/checkproxies` *(admin)*\n"
+        "   → Test proxies and keep only fast working ones\n\n"
         "🔄 `/refresh` *(admin)*\n"
         "   → Refresh IND tokens now\n"
         "   → (auto-refreshes every 45 min)\n\n"
@@ -957,6 +959,96 @@ async def proxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         lines.append(f"\n... and {total - 10} more")
     
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def check_single_proxy(proxy, test_url="https://httpbin.org/ip", timeout=5):
+    """Check if a proxy is working and fast. Returns (is_working, response_time_ms)."""
+    start_time = datetime.now()
+    try:
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
+        async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+            async with session.get(test_url, proxy=proxy, timeout=timeout) as response:
+                if response.status == 200:
+                    elapsed = (datetime.now() - start_time).total_seconds() * 1000
+                    return True, int(elapsed)
+    except Exception:
+        pass
+    return False, 0
+
+
+async def checkproxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /checkproxies - test all proxies and keep only working fast ones."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(
+            "🚫 *Access Denied!* Only admin can check proxies.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if not PROXY_LIST:
+        await update.message.reply_text(
+            "📭 *No proxies to check!*\n\n"
+            "Use /addproxies to add proxies first.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    total_proxies = len(PROXY_LIST)
+    status_msg = await update.message.reply_text(
+        f"🔍 *Checking Proxies...*\n\n"
+        f"📊 Total: {total_proxies}\n"
+        f"⏳ Testing... 0/{total_proxies}",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    working_proxies = []
+    working_count = 0
+    failed_count = 0
+    fast_threshold_ms = 3000  # Consider "fast" if < 3 seconds
+
+    # Test each proxy
+    for idx, proxy in enumerate(PROXY_LIST):
+        is_working, response_time = await check_single_proxy(proxy)
+        
+        if is_working:
+            working_proxies.append(proxy)
+            working_count += 1
+            
+            # Save immediately after each successful proxy
+            save_proxies(working_proxies)
+            global PROXY_LIST
+            PROXY_LIST = working_proxies.copy()
+            
+            # Update status every 10 proxies or on fast ones
+            if working_count % 10 == 0 or response_time < fast_threshold_ms:
+                try:
+                    await status_msg.edit_text(
+                        f"🔍 *Checking Proxies...*\n\n"
+                        f"📊 Total: {total_proxies}\n"
+                        f"✅ Working: {working_count}\n"
+                        f"❌ Failed: {failed_count}\n"
+                        f"⏳ Testing... {idx + 1}/{total_proxies}\n"
+                        f"⚡ Last: {response_time}ms",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                except Exception:
+                    pass  # Ignore edit errors (rate limits)
+        else:
+            failed_count += 1
+
+    # Final update
+    try:
+        await status_msg.edit_text(
+            f"✅ *Proxy Check Complete!*\n\n"
+            f"📊 *Total Tested:* {total_proxies}\n"
+            f"✅ *Working:* {working_count}\n"
+            f"❌ *Failed:* {failed_count}\n"
+            f"💾 *Saved:* {len(PROXY_LIST)} fast proxies\n\n"
+            f"⚡ Only working proxies kept!",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass
 
 
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1281,6 +1373,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("accounts", accounts_command))
     application.add_handler(CommandHandler("addproxies", addproxies_command))
     application.add_handler(CommandHandler("proxies", proxies_command))
+    application.add_handler(CommandHandler("checkproxies", checkproxies_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(MessageHandler(filters.Document.TXT, document_handler))
