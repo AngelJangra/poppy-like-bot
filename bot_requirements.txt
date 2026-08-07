@@ -1,0 +1,9 @@
+# Free Fire Like Bot - Dependencies
+# 👑 Owner & Developer: @YourPOPPY42
+# 🇮🇳 Indian-Only Free Fire Like Bot
+python-telegram-bot==21.6
+requests==2.32.3
+aiohttp==3.10.10
+pycryptodome==3.21.0
+protobuf==5.29.3
+supabase==2.31.0

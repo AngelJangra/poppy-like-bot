@@ -1,0 +1,27 @@
+# Free Fire Like Bot - 👑 @YourPOPPY42 🇮🇳
+# Old/irrelevant files
+junk/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+venv/
+env/
+
+# Sensitive data - DO NOT commit
+account.*.txt
+token_*.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vercel
+.vercel
+

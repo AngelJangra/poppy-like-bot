@@ -1,0 +1,23 @@
+# ============================================================
+# Free Fire Like Bot - Render Deployment Config
+# 👑 Owner & Developer: @YourPOPPY42
+# 🇮🇳 Indian-Only Free Fire Like Bot
+# ============================================================
+services:
+  - type: web
+    name: ff-like-bot
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r bot_requirements.txt"
+    startCommand: "python bot.py"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false  # Set in Render dashboard - from @BotFather
+      - key: API_BASE_URL
+        sync: false  # Set in Render dashboard - your Vercel API URL (optional)
+      - key: ADMIN_IDS
+        sync: false  # Set in Render dashboard - comma-separated Telegram user IDs
+      - key: SUPABASE_URL
+        sync: false  # Set in Render dashboard - e.g. https://xyz.supabase.co
+      - key: SUPABASE_KEY
+        sync: false  # Set in Render dashboard - your service_role key
