@@ -72,8 +72,10 @@ except ValueError:
 TOKEN_TTL = 3600  # 1 hour cache for tokens before refresh
 REFRESH_INTERVAL = int(os.getenv("REFRESH_INTERVAL", "2700"))  # 45 min auto-refresh
 
-# Proxy settings - comma-separated list of proxies (format: http://ip:port or socks5://ip:port)
-PROXY_LIST = [p.strip() for p in os.getenv("PROXY_LIST", "").split(",") if p.strip()]
+# Proxy settings
+# Priority: 1) Stored proxies (from /addproxies), 2) Environment variable
+PROXY_LIST = []  # Will be populated from storage or env vars
+PROXY_FILE = os.getenv("PROXY_FILE", "proxies.json")  # Persistent proxy storage
 
 # Debug mode: set DEBUG=true in Render env vars for verbose logs
 DEBUG_MODE = os.getenv("DEBUG", "").lower() in ("1", "true", "yes", "on")
@@ -283,6 +285,75 @@ def save_bot_tokens(data):
             json.dump(data, f, indent=2)
     except Exception as e:
         logging.error(f"Error saving tokens to file: {e}")
+
+
+# ============================================================
+# HELPERS — PROXY MANAGEMENT
+# ============================================================
+
+def load_proxies():
+    """Load stored proxies from file. Returns list of proxy strings."""
+    if os.path.exists(PROXY_FILE):
+        try:
+            with open(PROXY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return [p.strip() for p in data if p.strip()]
+                elif isinstance(data, dict) and "proxies" in data:
+                    return [p.strip() for p in data["proxies"] if p.strip()]
+        except Exception as e:
+            logging.error(f"Error loading proxies from file: {e}")
+    return []
+
+
+def save_proxies(proxies):
+    """Save proxies to file."""
+    try:
+        with open(PROXY_FILE, "w", encoding="utf-8") as f:
+            json.dump({"proxies": proxies}, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        logging.error(f"Error saving proxies to file: {e}")
+        return False
+
+
+def add_proxies_to_storage(new_proxies):
+    """Add proxies to storage, deduplicating."""
+    existing = load_proxies()
+    added = 0
+    skipped = 0
+    for proxy in new_proxies:
+        proxy = proxy.strip()
+        if not proxy:
+            continue
+        # Normalize proxy format (add http:// if no scheme)
+        if not proxy.startswith(("http://", "https://", "socks4://", "socks5://")):
+            proxy = "http://" + proxy
+        if proxy in existing:
+            skipped += 1
+            continue
+        existing.append(proxy)
+        added += 1
+    save_proxies(existing)
+    # Reload global PROXY_LIST
+    global PROXY_LIST
+    PROXY_LIST = existing
+    return added, skipped
+
+
+def init_proxies():
+    """Initialize PROXY_LIST from storage or environment variable."""
+    global PROXY_LIST
+    # Priority: 1) File storage, 2) Environment variable
+    stored = load_proxies()
+    if stored:
+        PROXY_LIST = stored
+    else:
+        # Fallback to env var
+        env_proxies = [p.strip() for p in os.getenv("PROXY_LIST", "").split(",") if p.strip()]
+        if env_proxies:
+            PROXY_LIST = env_proxies
+            save_proxies(PROXY_LIST)
 
 
 # ============================================================
@@ -670,6 +741,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "   → Paste accounts list after this command\n\n"
         "📊 `/accounts` *(admin)*\n"
         "   → View stored account count\n\n"
+        "🔌 `/addproxies` *(admin)*\n"
+        "   → Add proxies via text or .txt file\n\n"
+        "📋 `/proxies` *(admin)*\n"
+        "   → View stored proxy count\n\n"
         "🔄 `/refresh` *(admin)*\n"
         "   → Refresh IND tokens now\n"
         "   → (auto-refreshes every 45 min)\n\n"
@@ -678,7 +753,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "ℹ️ `/help`\n"
         "   → Show this menu\n\n"
         "━━━━━━━━━━━━━━━\n"
-        "🖥️ *Server:* `IND` 🇮🇳",
+        "🖥️ *Server:* `IND` 🇮🇳\n"
+        "💡 *Proxies:* Send .txt file or use `/addproxies`",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -766,6 +842,141 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     for region, accounts in data.items():
         lines.append(f"{emoji_for(region)} *{region}*: {len(accounts)} accounts")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def addproxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /addproxies - admin adds proxy list via text or .txt file."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(
+            "🚫 *Access Denied!*\n\n"
+            "Only the admin can add proxies.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # Check if a document was sent
+    if update.message.document:
+        # Download the .txt file
+        document = update.message.document
+        if not document.file_name.endswith('.txt'):
+            await update.message.reply_text(
+                "❌ *Invalid file format!*\n\n"
+                "Please send a `.txt` file.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        
+        try:
+            file = await document.get_file()
+            content = await file.download_as_bytearray()
+            text = content.decode('utf-8', errors='ignore')
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ *Failed to download file!*\n\n"
+                f"Error: {str(e)}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+    else:
+        # Get text from command
+        text = update.message.text or ""
+        parts = text.split(" ", 1)
+        text = parts[1].strip() if len(parts) > 1 else ""
+        
+        if not text:
+            await update.message.reply_text(
+                "⚠️ *No proxy data provided!*\n\n"
+                "Usage:\n"
+                "1. Send `/addproxies` followed by proxy list (one per line)\n"
+                "2. OR send a `.txt` file with proxies\n\n"
+                "📌 *Format:*\n"
+                "```\n"
+                "http://ip:port\n"
+                "socks5://ip:port\n"
+                "ip:port\n"
+                "```\n"
+                "One proxy per line. Scheme (http://) optional.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+    # Parse proxies (one per line)
+    proxy_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not proxy_lines:
+        await update.message.reply_text(
+            "❌ *No valid proxies found!*\n\n"
+            "Make sure the file or text contains proxy addresses.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    added, skipped = add_proxies_to_storage(proxy_lines)
+
+    await update.message.reply_text(
+        f"✅ *Proxies Added!*\n\n"
+        f"➕ *Added:* {added}\n"
+        f"⏭️ *Skipped (duplicates):* {skipped}\n"
+        f"📊 *Total Proxies:* {len(PROXY_LIST)}\n\n"
+        f"Proxies will be used in /like commands! 🚀",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def proxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /proxies - view stored proxy count (admin only)."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(
+            "🚫 *Access Denied!* Only admin can view proxies.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    total = len(PROXY_LIST)
+    if total == 0:
+        await update.message.reply_text(
+            "📭 *No proxies stored.*\n\n"
+            "Use /addproxies to add proxies.\n\n"
+            "You can send:\n"
+            "• `/addproxies` followed by proxy list\n"
+            "• OR a `.txt` file with proxies",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    lines = ["📊 *Stored Proxies:*\n"]
+    lines.append(f"🔌 *Total:* {total} proxies")
+    
+    # Show sample of proxies (first 10)
+    sample_size = min(10, total)
+    lines.append(f"\n📋 *Sample (first {sample_size}):*")
+    for i in range(sample_size):
+        proxy = PROXY_LIST[i]
+        lines.append(f"{i+1}. `{escape_md(proxy)}`")
+    
+    if total > 10:
+        lines.append(f"\n... and {total - 10} more")
+    
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle document uploads (for .txt proxy files)."""
+    if not update.message.document:
+        return
+    
+    # Check if user is admin
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(
+            "🚫 *Access Denied!*\n\n"
+            "Only admin can upload proxy files.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    
+    document = update.message.document
+    if document.file_name.endswith('.txt'):
+        # Treat as proxy file
+        await addproxies_command(update, context)
 
 
 async def refresh_ind_tokens(context: ContextTypes.DEFAULT_TYPE) -> tuple:
@@ -1068,10 +1279,17 @@ async def main() -> None:
     application.add_handler(CommandHandler("like", like_command))
     application.add_handler(CommandHandler("addaccounts", addaccounts_command))
     application.add_handler(CommandHandler("accounts", accounts_command))
+    application.add_handler(CommandHandler("addproxies", addproxies_command))
+    application.add_handler(CommandHandler("proxies", proxies_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(MessageHandler(filters.Document.TXT, document_handler))
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
+    # Initialize proxies from storage or environment
+    init_proxies()
+    logger.info(f"Proxies loaded: {len(PROXY_LIST)} proxies")
+    
     logger.info("Bot is running. Press Ctrl+C to stop.")
 
     # Start a tiny HTTP health server so Render marks the service as Live.
