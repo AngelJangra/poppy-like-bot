@@ -19,7 +19,6 @@ import logging
 import asyncio
 import signal
 import binascii
-import requests
 import aiohttp
 from aiohttp import web
 from datetime import datetime
@@ -72,6 +71,10 @@ except ValueError:
 
 TOKEN_TTL = 3600  # 1 hour cache for tokens before refresh
 REFRESH_INTERVAL = int(os.getenv("REFRESH_INTERVAL", "2700"))  # 45 min auto-refresh
+
+# Debug mode: set DEBUG=true in Render env vars for verbose logs
+DEBUG_MODE = os.getenv("DEBUG", "").lower() in ("1", "true", "yes", "on")
+LOG_LEVEL = logging.DEBUG if DEBUG_MODE else logging.INFO
 
 # ============================================================
 # JWT CONVERTER APIS (tried in order)
@@ -529,34 +532,43 @@ def build_headers(token):
     }
 
 
-def get_player_info(encrypted_uid, server_name, token):
-    """Fetch player info (like count)."""
+async def get_player_info(encrypted_uid, server_name, token):
+    """Fetch player info (like count). Async — non-blocking."""
+    logger = logging.getLogger(__name__)
     url = get_endpoint(server_name, "info")
     edata = bytes.fromhex(encrypted_uid)
     try:
-        response = requests.post(url, data=edata, headers=build_headers(token), verify=False, timeout=30)
-        if response.status_code != 200:
-            return None
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, data=edata, headers=build_headers(token)) as response:
+                if response.status != 200:
+                    logger.warning(f"get_player_info: HTTP {response.status} for {server_name}")
+                    return None
+                content = await response.read()
         try:
             items = like_count_pb2.Info()
-            items.ParseFromString(response.content)
+            items.ParseFromString(content)
             return items
         except DecodeError:
-            # Response may be plain text error
-            logging.error(f"Decode error: {response.content[:100]}")
+            logger.error(f"get_player_info decode error: {content[:100]}")
             return None
     except Exception as e:
-        logging.error(f"get_player_info error: {e}")
+        logger.error(f"get_player_info error: {e}")
         return None
 
 
 async def send_single_like(session, encrypted_uid, token, url):
-    """Send a single like request."""
+    """Send a single like request. Returns HTTP status or None on error."""
+    logger = logging.getLogger(__name__)
     edata = bytes.fromhex(encrypted_uid)
     try:
         async with session.post(url, data=edata, headers=build_headers(token)) as response:
-            return response.status
-    except Exception:
+            status = response.status
+            if status != 200:
+                logger.debug(f"Like request returned HTTP {status}")
+            return status
+    except Exception as e:
+        logger.warning(f"Like request error: {e}")
         return None
 
 
@@ -566,6 +578,8 @@ async def send_likes(target_uid, server_name, tokens, like_amount=None):
     protobuf_message = create_like_protobuf(target_uid, server_name)
     encrypted_uid = encrypt_message(protobuf_message)
     count_200 = 0
+    logger = logging.getLogger(__name__)
+    logger.debug(f"send_likes: target={target_uid} server={server_name} tokens={len(tokens)} amount={like_amount or LIKES_PER_REQUEST}")
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         # Process in batches of 200 to avoid overwhelming connections
@@ -577,8 +591,11 @@ async def send_likes(target_uid, server_name, tokens, like_amount=None):
                 token = tokens[i % len(tokens)]
                 tasks.append(send_single_like(session, encrypted_uid, token, url))
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            count_200 += sum(1 for r in results if r == 200)
+            batch_ok = sum(1 for r in results if r == 200)
+            count_200 += batch_ok
+            logger.debug(f"send_likes batch: {batch} requests, {batch_ok} OK")
             remaining -= batch
+    logger.debug(f"send_likes: total OK = {count_200}")
     return count_200
 
 
@@ -865,7 +882,7 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # Get before like count
     encrypted_uid = enc(target_uid)
-    before_info = get_player_info(encrypted_uid, server, tokens[0])
+    before_info = await get_player_info(encrypted_uid, server, tokens[0])
     before_like = 0
     if before_info:
         try:
@@ -878,7 +895,7 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     like_count = await send_likes(target_uid, server, tokens, like_amount)
 
     # Get after like count
-    after_info = get_player_info(encrypted_uid, server, tokens[0])
+    after_info = await get_player_info(encrypted_uid, server, tokens[0])
     after_like = 0
     nickname = "Unknown"
     player_uid = target_uid
@@ -891,17 +908,16 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             pass
 
-    likes_given = after_like - before_like
-    if likes_given != 0:
+    if like_count > 0:
         status_text = "✅ Success"
     else:
-        status_text = "⚠️ No likes delivered (cooldown?)"
+        status_text = "⚠️ No likes delivered (cooldown or invalid tokens?)"
 
     await msg.edit_text(
         "✅ *Likes Delivered!* ✅\n\n"
         f"👤 *Player:* {nickname}\n"
         f"🆔 *UID:* {player_uid}\n\n"
-        f"❤️ *Likes Given:* {likes_given}\n"
+        f"❤️ *Likes Sent:* {like_count}\n"
         f"📈 *Before:* {before_like} likes\n"
         f"📊 *After:* {after_like} likes\n\n"
         f"🔥 *Status:* {status_text}",
@@ -966,12 +982,15 @@ async def main() -> None:
 
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        level=logging.INFO,
+        level=LOG_LEVEL,
     )
     logger = logging.getLogger(__name__)
     logger.info("Starting Free Fire Like Bot...")
+    logger.info(f"DEBUG_MODE={DEBUG_MODE} (set DEBUG=true in Render env vars for verbose logs)")
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    # concurrent_updates=True lets multiple updates be processed at once,
+    # so a slow /like request never blocks other commands.
+    application = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 
     # Schedule auto token refresh every 45 min (REFRESH_INTERVAL = 2700s)
     application.job_queue.run_repeating(
