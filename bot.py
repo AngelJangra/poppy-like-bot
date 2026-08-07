@@ -957,7 +957,7 @@ def emoji_for(region: str) -> str:
 # MAIN
 # ============================================================
 
-def main() -> None:
+async def main() -> None:
     if not BOT_TOKEN:
         logging.error("BOT_TOKEN environment variable is not set!")
         return
@@ -989,8 +989,14 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
     logger.info("Bot is running. Press Ctrl+C to stop.")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # Manual lifecycle (compatible with Python 3.14+ where asyncio has no
+    # implicit event loop in the main thread)
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    await application.idle()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
