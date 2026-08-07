@@ -319,6 +319,7 @@ def save_proxies(proxies):
 
 def add_proxies_to_storage(new_proxies):
     """Add proxies to storage, deduplicating."""
+    global PROXY_LIST
     existing = load_proxies()
     added = 0
     skipped = 0
@@ -335,8 +336,6 @@ def add_proxies_to_storage(new_proxies):
         existing.append(proxy)
         added += 1
     save_proxies(existing)
-    # Reload global PROXY_LIST
-    global PROXY_LIST
     PROXY_LIST = existing
     return added, skipped
 
@@ -978,6 +977,8 @@ async def check_single_proxy(proxy, test_url="https://httpbin.org/ip", timeout=5
 
 async def checkproxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /checkproxies - test all proxies and keep only working fast ones."""
+    global PROXY_LIST
+    
     if not is_admin(update.effective_user.id):
         await update.message.reply_text(
             "🚫 *Access Denied!* Only admin can check proxies.",
@@ -1016,7 +1017,6 @@ async def checkproxies_command(update: Update, context: ContextTypes.DEFAULT_TYP
             
             # Save immediately after each successful proxy
             save_proxies(working_proxies)
-            global PROXY_LIST
             PROXY_LIST = working_proxies.copy()
             
             # Update status every 10 proxies or on fast ones
